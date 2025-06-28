@@ -42,7 +42,6 @@ with st.sidebar:
     
     analyze_button = st.button("Analyze Sector Performance")
 
-# Cache sector data to avoid repeated API calls
 @st.cache_data(ttl=3600)
 def get_sector_info(ticker):
     try:
@@ -53,10 +52,10 @@ def get_sector_info(ticker):
             'industry': info.get('industry', 'Unknown'),
             'company': info.get('longName', ticker)
         }
-    except:
+    except Exception as e:
+        st.warning(f"Couldn't fetch info for {ticker}: {str(e)}")
         return {'sector': 'Unknown', 'industry': 'Unknown', 'company': ticker}
 
-# Function to calculate returns
 def calculate_returns(ticker, days):
     end_date = datetime.today()
     start_date = end_date - timedelta(days=days)
@@ -67,23 +66,20 @@ def calculate_returns(ticker, days):
             start_price = data['Close'].iloc[0]
             end_price = data['Close'].iloc[-1]
             return (end_price - start_price) / start_price * 100
-        return None
-    except:
-        return None
+        return np.nan
+    except Exception as e:
+        st.warning(f"Couldn't fetch data for {ticker}: {str(e)}")
+        return np.nan
 
-# Main analysis function
 def analyze_sectors(tickers, timeframes):
     if not tickers:
         st.warning("Please provide at least one valid ticker")
         return None
     
-    # Convert timeframe labels to days
     timeframe_days = {tf: int(tf.split()[0]) for tf in timeframes}
     
-    # Initialize progress bar
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
     results = []
     total_tickers = len(tickers)
     
@@ -96,7 +92,7 @@ def analyze_sectors(tickers, timeframes):
         
         for tf_label, days in timeframe_days.items():
             ret = calculate_returns(ticker, days)
-            if ret is not None:
+            if not pd.isna(ret):
                 returns[tf_label] = ret
         
         if returns:
@@ -117,112 +113,130 @@ def analyze_sectors(tickers, timeframes):
     
     return pd.DataFrame(results)
 
-# Process inputs and display results
 if analyze_button:
-    # Get tickers from the selected input method
-    if upload_option == "Upload Excel File" and uploaded_file is not None:
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
+    try:
+        if upload_option == "Upload Excel File" and uploaded_file is not None:
+            try:
+                if uploaded_file.name.endswith('.csv'):
+                    df = pd.read_csv(uploaded_file)
+                else:
+                    df = pd.read_excel(uploaded_file)
+                
+                ticker_columns = [col for col in df.columns if 'ticker' in col.lower() or 'symbol' in col.lower()]
+                if ticker_columns:
+                    tickers = df[ticker_columns[0]].dropna().astype(str).str.upper().unique().tolist()
+                else:
+                    tickers = df.iloc[:, 0].dropna().astype(str).str.upper().unique().tolist()
+            except Exception as e:
+                st.error(f"Error reading file: {e}")
+                tickers = []
+        elif upload_option == "Enter Manually" and manual_tickers:
+            if "," in manual_tickers:
+                tickers = [t.strip().upper() for t in manual_tickers.split(",")]
             else:
-                df = pd.read_excel(uploaded_file)
-            
-            # Try to find a column with tickers
-            ticker_columns = [col for col in df.columns if 'ticker' in col.lower() or 'symbol' in col.lower()]
-            if ticker_columns:
-                tickers = df[ticker_columns[0]].dropna().astype(str).unique().tolist()
-            else:
-                # Assume first column contains tickers
-                tickers = df.iloc[:, 0].dropna().astype(str).unique().tolist()
-        except Exception as e:
-            st.error(f"Error reading file: {e}")
-            tickers = []
-    elif upload_option == "Enter Manually" and manual_tickers:
-        # Parse manually entered tickers
-        if "," in manual_tickers:
-            tickers = [t.strip().upper() for t in manual_tickers.split(",")]
+                tickers = [t.strip().upper() for t in manual_tickers.split("\n") if t.strip()]
         else:
-            tickers = [t.strip().upper() for t in manual_tickers.split("\n") if t.strip()]
-    else:
-        tickers = []
-    
-    # Clean tickers
-    tickers = [t for t in tickers if t and not t.isspace()]
-    
-    if not tickers:
-        st.warning("Please provide valid ticker symbols")
-    elif not timeframes:
-        st.warning("Please select at least one timeframe")
-    else:
-        with st.spinner("Analyzing sector performance..."):
-            results_df = analyze_sectors(tickers, timeframes)
-            
-            if results_df is not None:
-                st.success("Analysis complete!")
+            tickers = []
+        
+        tickers = [t for t in tickers if t and not t.isspace()]
+        
+        if not tickers:
+            st.warning("Please provide valid ticker symbols")
+        elif not timeframes:
+            st.warning("Please select at least one timeframe")
+        else:
+            with st.spinner("Analyzing sector performance..."):
+                results_df = analyze_sectors(tickers, timeframes)
                 
-                # Display raw data
-                st.subheader("Raw Data")
-                st.dataframe(results_df.style.format(subset=timeframes, formatter="{:.2f}%"))
-                
-                # Calculate sector averages
-                sector_avg = results_df.groupby('Sector')[timeframes].mean().reset_index()
-                sector_avg = sector_avg.sort_values(by=timeframes[0], ascending=False)
-                
-                # Display sector performance
-                st.subheader("Sector Performance Averages")
-                
-                # Plot for each timeframe
-                for tf in timeframes:
-                    fig = px.bar(
-                        sector_avg,
-                        x='Sector',
-                        y=tf,
-                        title=f'Sector Performance ({tf})',
-                        labels={tf: 'Return (%)'},
-                        color=tf,
-                        color_continuous_scale=px.colors.diverging.RdYlGn,
-                        height=500
-                    )
-                    fig.update_layout(
-                        xaxis_title="Sector",
-                        yaxis_title="Return (%)",
-                        hovermode="x"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                # Show best/worst performing sectors
-                st.subheader("Performance Highlights")
-                
-                cols = st.columns(len(timeframes))
-                for idx, tf in enumerate(timeframes):
-                    with cols[idx]:
-                        st.metric(
-                            label=f"Best Sector ({tf})",
-                            value=sector_avg.iloc[0]['Sector'],
-                            delta=f"{sector_avg.iloc[0][tf]:.2f}%"
-                        )
+                if results_df is not None:
+                    st.success("Analysis complete!")
+                    
+                    # Display raw data with proper error handling
+                    st.subheader("Raw Data")
+                    try:
+                        display_df = results_df.copy()
+                        for tf in timeframes:
+                            if tf in display_df.columns:
+                                display_df[tf] = pd.to_numeric(display_df[tf], errors='coerce')
                         
-                        st.metric(
-                            label=f"Worst Sector ({tf})",
-                            value=sector_avg.iloc[-1]['Sector'],
-                            delta=f"{sector_avg.iloc[-1][tf]:.2f}%"
+                        format_dict = {tf: "{:.2f}%" for tf in timeframes if tf in display_df.columns}
+                        st.dataframe(display_df.style.format(format_dict))
+                    except Exception as e:
+                        st.error(f"Error formatting data: {e}")
+                        st.dataframe(results_df)
+                    
+                    # Calculate sector averages
+                    try:
+                        numeric_cols = [tf for tf in timeframes if tf in results_df.columns]
+                        sector_avg = results_df.groupby('Sector')[numeric_cols].mean().reset_index()
+                        
+                        if not sector_avg.empty:
+                            # Display sector performance
+                            st.subheader("Sector Performance Averages")
+                            
+                            for tf in numeric_cols:
+                                sorted_avg = sector_avg.sort_values(by=tf, ascending=False)
+                                fig = px.bar(
+                                    sorted_avg,
+                                    x='Sector',
+                                    y=tf,
+                                    title=f'Sector Performance ({tf})',
+                                    labels={tf: 'Return (%)'},
+                                    color=tf,
+                                    color_continuous_scale=px.colors.diverging.RdYlGn,
+                                    height=500
+                                )
+                                fig.update_layout(
+                                    xaxis_title="Sector",
+                                    yaxis_title="Return (%)",
+                                    hovermode="x"
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Show best/worst performing sectors
+                            st.subheader("Performance Highlights")
+                            
+                            cols = st.columns(len(numeric_cols))
+                            for idx, tf in enumerate(numeric_cols):
+                                with cols[idx]:
+                                    best_sector = sector_avg.loc[sector_avg[tf].idxmax()]
+                                    st.metric(
+                                        label=f"Best Sector ({tf})",
+                                        value=best_sector['Sector'],
+                                        delta=f"{best_sector[tf]:.2f}%"
+                                    )
+                                    
+                                    worst_sector = sector_avg.loc[sector_avg[tf].idxmin()]
+                                    st.metric(
+                                        label=f"Worst Sector ({tf})",
+                                        value=worst_sector['Sector'],
+                                        delta=f"{worst_sector[tf]:.2f}%"
+                                    )
+                    except Exception as e:
+                        st.error(f"Error calculating sector averages: {e}")
+                    
+                    # Download button for results
+                    try:
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                            results_df.to_excel(writer, sheet_name='Stock Performance', index=False)
+                            if 'sector_avg' in locals():
+                                sector_avg.to_excel(writer, sheet_name='Sector Averages', index=False)
+                        output.seek(0)
+                        
+                        st.download_button(
+                            label="Download Full Results",
+                            data=output,
+                            file_name="sector_performance_analysis.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
-                
-                # Download button for results
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    results_df.to_excel(writer, sheet_name='Stock Performance', index=False)
-                    sector_avg.to_excel(writer, sheet_name='Sector Averages', index=False)
-                output.seek(0)
-                
-                st.download_button(
-                    label="Download Full Results",
-                    data=output,
-                    file_name="sector_performance_analysis.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-else:
-    # Show example when the app first loads
+                    except Exception as e:
+                        st.error(f"Error generating download file: {e}")
+    except Exception as e:
+        st.error(f"An unexpected error occurred: {e}")
+
+# Example section when the app first loads
+if not analyze_button:
     st.info("""
     **How to use this app:**
     1. Upload an Excel/CSV file with tickers or enter them manually
@@ -232,7 +246,6 @@ else:
     **Example Tickers:** AAPL, MSFT, GOOGL, AMZN, TSLA, JPM, WMT, XOM
     """)
 
-# Add some footer information
 st.markdown("---")
 st.markdown("""
 **Data Source:** Yahoo Finance (free API)  
